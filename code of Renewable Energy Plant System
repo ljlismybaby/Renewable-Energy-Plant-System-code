@@ -1,0 +1,730 @@
+// Renewable Energy Plant System (REPS)
+// Scala functional-style implementation with CSV file I/O
+// -------------------------------------------------------
+// Suggested file name for simple submission: Main.scala
+// You can run it as one file, or split classes into packages later.
+
+import scala.io.StdIn.readLine
+import scala.io.Source
+import java.io.{File, PrintWriter}
+import java.time.LocalDate
+import java.time.format.{DateTimeFormatter, DateTimeParseException}
+import scala.util.{Try, Success, Failure}
+
+// =============================
+// Models
+// =============================
+
+sealed trait EnergySource {
+  def name: String
+}
+
+case object Solar extends EnergySource {
+  val name: String = "Solar"
+}
+
+case object Wind extends EnergySource {
+  val name: String = "Wind"
+}
+
+case object Hydro extends EnergySource {
+  val name: String = "Hydro"
+}
+
+object EnergySource {
+  def fromString(value: String): Either[String, EnergySource] =
+    value.trim.toLowerCase match {
+      case "solar" => Right(Solar)
+      case "wind"  => Right(Wind)
+      case "hydro" => Right(Hydro)
+      case other    => Left(s"Invalid energy source: '$other'. Use Solar, Wind, or Hydro.")
+    }
+
+  val all: List[EnergySource] = List(Solar, Wind, Hydro)
+}
+
+case class EnergyRecord(
+    id: Int,
+    source: EnergySource,
+    date: LocalDate,
+    hour: Int,
+    energyGeneratedKwh: Double,
+    storageCapacityKwh: Double,
+    equipmentStatus: String
+)
+
+case class PlantView(
+    totalGeneratedKwh: Double,
+    totalStorageCapacityKwh: Double,
+    records: List[EnergyRecord]
+)
+
+sealed trait AlertLevel {
+  def label: String
+}
+
+case object WarningLevel extends AlertLevel {
+  val label: String = "WARNING"
+}
+
+case object CriticalLevel extends AlertLevel {
+  val label: String = "CRITICAL"
+}
+
+case class Alert(
+    recordId: Int,
+    source: EnergySource,
+    date: LocalDate,
+    hour: Int,
+    level: AlertLevel,
+    message: String
+)
+
+case class StatisticsResult(
+    mean: Double,
+    median: Double,
+    modes: List[Double],
+    range: Double,
+    midrange: Double
+)
+
+// =============================
+// Date utilities and validation
+// =============================
+
+object DateUtil {
+  val formatter: DateTimeFormatter = DateTimeFormatter.ofPattern("dd/MM/yyyy")
+
+  def parseDate(input: String): Either[String, LocalDate] =
+    Try(LocalDate.parse(input.trim, formatter)) match {
+      case Success(date) => Right(date)
+      case Failure(_: DateTimeParseException) =>
+        Left(
+          "Invalid date format. Please enter the date in the format 'DD/MM/YYYY'. " +
+            "For example, enter '12/04/2024' for April 12, 2024."
+        )
+      case Failure(exception) => Left(s"Date error: ${exception.getMessage}")
+    }
+
+  def formatDate(date: LocalDate): String = date.format(formatter)
+}
+
+// =============================
+// CSV Storage
+// Imperative-style file I/O as requested
+// =============================
+
+object CsvStorage {
+  private val header: String =
+    "id,source,date,hour,energyGeneratedKwh,storageCapacityKwh,equipmentStatus"
+
+  def ensureFileExists(filePath: String): Unit = {
+    val file = new File(filePath)
+    if (!file.exists()) {
+      val writer = new PrintWriter(file)
+      try writer.println(header)
+      finally writer.close()
+    }
+  }
+
+  def writeRecords(filePath: String, records: List[EnergyRecord]): Unit = {
+    val writer = new PrintWriter(new File(filePath))
+    try {
+      writer.println(header)
+      records.foreach(record => writer.println(toCsv(record)))
+    } finally writer.close()
+  }
+
+  def appendRecord(filePath: String, record: EnergyRecord): Unit = {
+    ensureFileExists(filePath)
+    val writer = new java.io.FileWriter(filePath, true)
+    try writer.write(toCsv(record) + System.lineSeparator())
+    finally writer.close()
+  }
+
+  def readRecords(filePath: String): Either[String, List[EnergyRecord]] = {
+    ensureFileExists(filePath)
+
+    Try {
+      val source = Source.fromFile(filePath)
+      try {
+        source.getLines().drop(1).toList
+      } finally source.close()
+    } match {
+      case Failure(exception) => Left(s"Could not read CSV file: ${exception.getMessage}")
+      case Success(lines) =>
+        val parsed = lines.filter(_.trim.nonEmpty).map(parseCsvLine)
+        collectEither(parsed)
+    }
+  }
+
+  private def toCsv(record: EnergyRecord): String =
+    List(
+      record.id.toString,
+      record.source.name,
+      DateUtil.formatDate(record.date),
+      record.hour.toString,
+      record.energyGeneratedKwh.toString,
+      record.storageCapacityKwh.toString,
+      record.equipmentStatus
+    ).mkString(",")
+
+  private def parseCsvLine(line: String): Either[String, EnergyRecord] = {
+    val parts = line.split(",", -1).map(_.trim).toList
+
+    parts match {
+      case idText :: sourceText :: dateText :: hourText :: energyText :: storageText :: status :: Nil =>
+        for {
+          id      <- parseInt(idText, "id")
+          source  <- EnergySource.fromString(sourceText)
+          date    <- DateUtil.parseDate(dateText)
+          hour    <- parseHour(hourText)
+          energy  <- parseDouble(energyText, "energyGeneratedKwh")
+          storage <- parseDouble(storageText, "storageCapacityKwh")
+        } yield EnergyRecord(id, source, date, hour, energy, storage, status)
+
+      case _ => Left(s"Invalid CSV line: $line")
+    }
+  }
+
+  private def parseInt(value: String, fieldName: String): Either[String, Int] =
+    Try(value.toInt).toEither.left.map(_ => s"Invalid integer in field '$fieldName': $value")
+
+  private def parseDouble(value: String, fieldName: String): Either[String, Double] =
+    Try(value.toDouble).toEither.left.map(_ => s"Invalid number in field '$fieldName': $value")
+
+  private def parseHour(value: String): Either[String, Int] =
+    parseInt(value, "hour").flatMap { hour =>
+      if (hour >= 0 && hour <= 23) Right(hour)
+      else Left("Invalid hour. Hour must be between 0 and 23.")
+    }
+
+  private def collectEither[A](values: List[Either[String, A]]): Either[String, List[A]] =
+    values.foldRight(Right(Nil): Either[String, List[A]]) { (item, accumulator) =>
+      for {
+        value <- item
+        list  <- accumulator
+      } yield value :: list
+    }
+}
+
+// =============================
+// Sample data generator
+// =============================
+
+object SampleData {
+  def initialRecords: List[EnergyRecord] =
+    List(
+      EnergyRecord(1, Solar, LocalDate.of(2024, 4, 12), 8, 120.5, 500.0, "OK"),
+      EnergyRecord(2, Solar, LocalDate.of(2024, 4, 12), 9, 150.0, 510.0, "OK"),
+      EnergyRecord(3, Solar, LocalDate.of(2024, 4, 12), 10, 180.5, 530.0, "OK"),
+      EnergyRecord(4, Wind, LocalDate.of(2024, 4, 12), 8, 90.0, 450.0, "OK"),
+      EnergyRecord(5, Wind, LocalDate.of(2024, 4, 12), 9, 40.0, 430.0, "LOW_OUTPUT"),
+      EnergyRecord(6, Hydro, LocalDate.of(2024, 4, 12), 8, 210.0, 700.0, "OK"),
+      EnergyRecord(7, Hydro, LocalDate.of(2024, 4, 13), 8, 0.0, 690.0, "MALFUNCTION"),
+      EnergyRecord(8, Wind, LocalDate.of(2024, 4, 13), 11, 115.0, 470.0, "OK"),
+      EnergyRecord(9, Solar, LocalDate.of(2024, 4, 14), 12, 220.0, 560.0, "OK"),
+      EnergyRecord(10, Hydro, LocalDate.of(2024, 4, 14), 13, 230.0, 720.0, "OK"),
+      EnergyRecord(11, Wind, LocalDate.of(2024, 4, 20), 14, 125.0, 490.0, "OK"),
+      EnergyRecord(12, Solar, LocalDate.of(2024, 5, 1), 10, 240.0, 600.0, "OK")
+    )
+}
+
+// =============================
+// Functional services
+// =============================
+
+object DataCollector {
+  def addRecord(records: List[EnergyRecord], record: EnergyRecord): List[EnergyRecord] =
+    records :+ record
+
+  def nextId(records: List[EnergyRecord]): Int =
+    records.map(_.id).reduceOption(_ max _).getOrElse(0) + 1
+}
+
+object PlantController {
+  def plantView(records: List[EnergyRecord]): PlantView =
+    PlantView(
+      totalGeneratedKwh = records.map(_.energyGeneratedKwh).sum,
+      totalStorageCapacityKwh = records.map(_.storageCapacityKwh).sum,
+      records = records
+    )
+
+  def improveProductionSuggestion(record: EnergyRecord): Option[String] =
+    record match {
+      case EnergyRecord(_, Solar, _, _, energy, _, _) if energy < 80.0 =>
+        Some("Solar production is low. Suggest checking panel angle, dust level, and sun tracking motor.")
+      case EnergyRecord(_, Wind, _, _, energy, _, _) if energy < 60.0 =>
+        Some("Wind production is low. Suggest checking turbine direction and wind tracking system.")
+      case EnergyRecord(_, Hydro, _, _, energy, _, _) if energy < 100.0 =>
+        Some("Hydro production is low. Suggest checking water flow, turbine blades, and generator health.")
+      case _ => None
+    }
+}
+
+object DataFilter {
+  def byHour(records: List[EnergyRecord], hour: Int): List[EnergyRecord] =
+    records.filter(_.hour == hour)
+
+  def byDay(records: List[EnergyRecord], date: LocalDate): List[EnergyRecord] =
+    records.filter(_.date == date)
+
+  def byWeek(records: List[EnergyRecord], startDate: LocalDate): List[EnergyRecord] = {
+    val endDate = startDate.plusDays(6)
+    records.filter(record => !record.date.isBefore(startDate) && !record.date.isAfter(endDate))
+  }
+
+  def byMonth(records: List[EnergyRecord], year: Int, month: Int): List[EnergyRecord] =
+    records.filter(record => record.date.getYear == year && record.date.getMonthValue == month)
+
+  def bySource(records: List[EnergyRecord], source: EnergySource): List[EnergyRecord] =
+    records.filter(_.source == source)
+}
+
+object DataSorter {
+  def sortByDate(records: List[EnergyRecord], ascending: Boolean): List[EnergyRecord] =
+    sort(records, ascending)(_.date.toEpochDay)
+
+  def sortByHour(records: List[EnergyRecord], ascending: Boolean): List[EnergyRecord] =
+    sort(records, ascending)(_.hour)
+
+  def sortByEnergy(records: List[EnergyRecord], ascending: Boolean): List[EnergyRecord] =
+    sort(records, ascending)(_.energyGeneratedKwh)
+
+  def sortByStorage(records: List[EnergyRecord], ascending: Boolean): List[EnergyRecord] =
+    sort(records, ascending)(_.storageCapacityKwh)
+
+  // Higher-order function with type parameterization
+  private def sort[A: Ordering](records: List[EnergyRecord], ascending: Boolean)(field: EnergyRecord => A): List[EnergyRecord] = {
+    val sorted = records.sortBy(field)
+    if (ascending) sorted else sorted.reverse
+  }
+}
+
+object DataSearch {
+  def search(records: List[EnergyRecord], keyword: String): List[EnergyRecord] = {
+    val lowerKeyword = keyword.trim.toLowerCase
+
+    records.filter { record =>
+      record.id.toString.contains(lowerKeyword) ||
+      record.source.name.toLowerCase.contains(lowerKeyword) ||
+      DateUtil.formatDate(record.date).contains(lowerKeyword) ||
+      record.hour.toString.contains(lowerKeyword) ||
+      record.energyGeneratedKwh.toString.contains(lowerKeyword) ||
+      record.storageCapacityKwh.toString.contains(lowerKeyword) ||
+      record.equipmentStatus.toLowerCase.contains(lowerKeyword)
+    }
+  }
+}
+
+object DataAnalyzer {
+  def analyze(records: List[EnergyRecord]): Either[String, StatisticsResult] = {
+    val values = records.map(_.energyGeneratedKwh)
+
+    if (values.isEmpty) Left("No data available for analysis.")
+    else {
+      val minimum = values.min
+      val maximum = values.max
+
+      Right(
+        StatisticsResult(
+          mean = mean(values),
+          median = median(values),
+          modes = mode(values),
+          range = maximum - minimum,
+          midrange = (minimum + maximum) / 2.0
+        )
+      )
+    }
+  }
+
+  def mean(values: List[Double]): Double =
+    values.sum / values.length
+
+  def median(values: List[Double]): Double = {
+    val sorted = values.sorted
+    val length = sorted.length
+    val middle = length / 2
+
+    if (length % 2 == 1) sorted(middle)
+    else (sorted(middle - 1) + sorted(middle)) / 2.0
+  }
+
+  def mode(values: List[Double]): List[Double] = {
+    val frequencies = values.groupBy(identity).view.mapValues(_.length).toMap
+    val highestFrequency = frequencies.values.max
+    frequencies.filter(_._2 == highestFrequency).keys.toList.sorted
+  }
+}
+
+object AlertService {
+  private val lowOutputThresholds: Map[EnergySource, Double] =
+    Map(
+      Solar -> 80.0,
+      Wind  -> 60.0,
+      Hydro -> 100.0
+    )
+
+  def detectAlerts(records: List[EnergyRecord]): List[Alert] =
+    records.flatMap(detectAlert)
+
+  def detectAlert(record: EnergyRecord): List[Alert] = {
+    val malfunctionAlert =
+      if (record.equipmentStatus.trim.equalsIgnoreCase("MALFUNCTION"))
+        Some(
+          Alert(
+            record.id,
+            record.source,
+            record.date,
+            record.hour,
+            CriticalLevel,
+            "Equipment malfunction detected. Immediate maintenance required."
+          )
+        )
+      else None
+
+    val lowOutputAlert =
+      if (record.energyGeneratedKwh < lowOutputThresholds(record.source))
+        Some(
+          Alert(
+            record.id,
+            record.source,
+            record.date,
+            record.hour,
+            WarningLevel,
+            s"Low energy output detected: ${record.energyGeneratedKwh} kWh."
+          )
+        )
+      else None
+
+    List(malfunctionAlert, lowOutputAlert).flatten
+  }
+}
+
+// =============================
+// Recursive utilities
+// =============================
+
+object RecursivePrinter {
+  def printRecords(records: List[EnergyRecord]): Unit = {
+    def loop(remaining: List[EnergyRecord]): Unit =
+      remaining match {
+        case Nil => ()
+        case head :: tail =>
+          println(formatRecord(head))
+          loop(tail)
+      }
+
+    if (records.isEmpty) println("No records found.")
+    else loop(records)
+  }
+
+  def printAlerts(alerts: List[Alert]): Unit = {
+    def loop(remaining: List[Alert]): Unit =
+      remaining match {
+        case Nil => ()
+        case head :: tail =>
+          println(formatAlert(head))
+          loop(tail)
+      }
+
+    if (alerts.isEmpty) println("No alerts found. Plant is operating normally.")
+    else loop(alerts)
+  }
+
+  private def formatRecord(record: EnergyRecord): String =
+    f"${record.id}%3d | ${record.source.name}%-5s | ${DateUtil.formatDate(record.date)} | Hour: ${record.hour}%02d | Energy: ${record.energyGeneratedKwh}%8.2f kWh | Storage: ${record.storageCapacityKwh}%8.2f kWh | Status: ${record.equipmentStatus}"
+
+  private def formatAlert(alert: Alert): String =
+    s"[${alert.level.label}] Record ${alert.recordId} | ${alert.source.name} | ${DateUtil.formatDate(alert.date)} ${alert.hour}:00 | ${alert.message}"
+}
+
+// =============================
+// Input helpers
+// =============================
+
+object InputHelper {
+  def readInt(prompt: String): Either[String, Int] = {
+    print(prompt)
+    Try(readLine().trim.toInt).toEither.left.map(_ => "Invalid number. Please enter an integer.")
+  }
+
+  def readDouble(prompt: String): Either[String, Double] = {
+    print(prompt)
+    Try(readLine().trim.toDouble).toEither.left.map(_ => "Invalid number. Please enter a decimal number.")
+  }
+
+  def readDate(prompt: String): Either[String, LocalDate] = {
+    print(prompt)
+    DateUtil.parseDate(readLine())
+  }
+
+  def readSource(prompt: String): Either[String, EnergySource] = {
+    print(prompt)
+    EnergySource.fromString(readLine())
+  }
+
+  def readNonEmptyText(prompt: String): Either[String, String] = {
+    print(prompt)
+    val text = readLine().trim
+    if (text.nonEmpty) Right(text)
+    else Left("Input cannot be empty.")
+  }
+
+  def readHour(prompt: String): Either[String, Int] =
+    readInt(prompt).flatMap { hour =>
+      if (hour >= 0 && hour <= 23) Right(hour)
+      else Left("Invalid hour. Hour must be between 0 and 23.")
+    }
+}
+
+// =============================
+// Main Application
+// =============================
+
+object Main {
+  private val filePath = "energy_data.csv"
+
+  def main(args: Array[String]): Unit = {
+    CsvStorage.ensureFileExists(filePath)
+
+    val records = CsvStorage.readRecords(filePath) match {
+      case Right(existingRecords) if existingRecords.nonEmpty => existingRecords
+      case Right(_) =>
+        CsvStorage.writeRecords(filePath, SampleData.initialRecords)
+        SampleData.initialRecords
+      case Left(error) =>
+        println(error)
+        SampleData.initialRecords
+    }
+
+    println("====================================")
+    println(" Renewable Energy Plant System")
+    println("====================================")
+    menuLoop(records)
+  }
+
+  private def menuLoop(records: List[EnergyRecord]): Unit = {
+    printMenu()
+    print("Choose an option: ")
+
+    readLine().trim match {
+      case "1" =>
+        showPlantView(records)
+        menuLoop(records)
+
+      case "2" =>
+        val updatedRecords = addNewRecord(records)
+        menuLoop(updatedRecords)
+
+      case "3" =>
+        filterMenu(records)
+        menuLoop(records)
+
+      case "4" =>
+        sortMenu(records)
+        menuLoop(records)
+
+      case "5" =>
+        searchRecords(records)
+        menuLoop(records)
+
+      case "6" =>
+        analyzeRecords(records)
+        menuLoop(records)
+
+      case "7" =>
+        showAlerts(records)
+        menuLoop(records)
+
+      case "8" =>
+        showSuggestions(records)
+        menuLoop(records)
+
+      case "9" =>
+        println("Saving data and exiting. Goodbye!")
+        CsvStorage.writeRecords(filePath, records)
+
+      case _ =>
+        println("Invalid option. Please choose a valid menu number.")
+        menuLoop(records)
+    }
+  }
+
+  private def printMenu(): Unit = {
+    println()
+    println("------------- MENU -------------")
+    println("1. View power plant generation and storage capacity")
+    println("2. Add new energy record")
+    println("3. Filter data")
+    println("4. Sort data")
+    println("5. Search data")
+    println("6. Analyze energy data")
+    println("7. Detect alerts")
+    println("8. Show production improvement suggestions")
+    println("9. Exit")
+    println("--------------------------------")
+  }
+
+  private def showPlantView(records: List[EnergyRecord]): Unit = {
+    val view = PlantController.plantView(records)
+    println()
+    println("Power Plant View")
+    println(s"Total generated energy: ${view.totalGeneratedKwh} kWh")
+    println(s"Total storage capacity: ${view.totalStorageCapacityKwh} kWh")
+    println("Records stored in CSV file:")
+    RecursivePrinter.printRecords(view.records)
+  }
+
+  private def addNewRecord(records: List[EnergyRecord]): List[EnergyRecord] = {
+    val result = for {
+      source  <- InputHelper.readSource("Enter source Solar/Wind/Hydro: ")
+      date    <- InputHelper.readDate("Enter date DD/MM/YYYY: ")
+      hour    <- InputHelper.readHour("Enter hour 0-23: ")
+      energy  <- InputHelper.readDouble("Enter energy generated in kWh: ")
+      storage <- InputHelper.readDouble("Enter storage capacity in kWh: ")
+      status  <- InputHelper.readNonEmptyText("Enter equipment status OK/LOW_OUTPUT/MALFUNCTION: ")
+    } yield EnergyRecord(
+      id = DataCollector.nextId(records),
+      source = source,
+      date = date,
+      hour = hour,
+      energyGeneratedKwh = energy,
+      storageCapacityKwh = storage,
+      equipmentStatus = status
+    )
+
+    result match {
+      case Right(record) =>
+        CsvStorage.appendRecord(filePath, record)
+        println("Record added successfully.")
+        DataCollector.addRecord(records, record)
+
+      case Left(error) =>
+        println(error)
+        records
+    }
+  }
+
+  private def filterMenu(records: List[EnergyRecord]): Unit = {
+    println()
+    println("Filter by:")
+    println("1. Hour")
+    println("2. Day")
+    println("3. Week")
+    println("4. Month")
+    println("5. Source")
+    print("Choose filter option: ")
+
+    val filteredEither: Either[String, List[EnergyRecord]] =
+      readLine().trim match {
+        case "1" => InputHelper.readHour("Enter hour 0-23: ").map(DataFilter.byHour(records, _))
+        case "2" => InputHelper.readDate("Enter date DD/MM/YYYY: ").map(DataFilter.byDay(records, _))
+        case "3" => InputHelper.readDate("Enter week start date DD/MM/YYYY: ").map(DataFilter.byWeek(records, _))
+        case "4" =>
+          for {
+            year  <- InputHelper.readInt("Enter year, e.g. 2024: ")
+            month <- InputHelper.readInt("Enter month 1-12: ")
+            result <- if (month >= 1 && month <= 12) Right(DataFilter.byMonth(records, year, month))
+                      else Left("Invalid month. Month must be between 1 and 12.")
+          } yield result
+        case "5" => InputHelper.readSource("Enter source Solar/Wind/Hydro: ").map(DataFilter.bySource(records, _))
+        case _   => Left("Invalid filter option.")
+      }
+
+    filteredEither match {
+      case Right(filtered) if filtered.nonEmpty => RecursivePrinter.printRecords(filtered)
+      case Right(_) => println("No available data for the selected filter. Please choose another value.")
+      case Left(error) => println(error)
+    }
+  }
+
+  private def sortMenu(records: List[EnergyRecord]): Unit = {
+    println()
+    println("Sort by:")
+    println("1. Date")
+    println("2. Hour")
+    println("3. Energy generated")
+    println("4. Storage capacity")
+    print("Choose sort option: ")
+    val option = readLine().trim
+
+    print("Ascending order? y/n: ")
+    val ascending = readLine().trim.equalsIgnoreCase("y")
+
+    val sortedEither = option match {
+      case "1" => Right(DataSorter.sortByDate(records, ascending))
+      case "2" => Right(DataSorter.sortByHour(records, ascending))
+      case "3" => Right(DataSorter.sortByEnergy(records, ascending))
+      case "4" => Right(DataSorter.sortByStorage(records, ascending))
+      case _   => Left("Invalid sort option.")
+    }
+
+    sortedEither match {
+      case Right(sorted) => RecursivePrinter.printRecords(sorted)
+      case Left(error)   => println(error)
+    }
+  }
+
+  private def searchRecords(records: List[EnergyRecord]): Unit = {
+    print("Enter search keyword: ")
+    val keyword = readLine()
+    val results = DataSearch.search(records, keyword)
+
+    if (results.isEmpty) println("No matching data found.")
+    else RecursivePrinter.printRecords(results)
+  }
+
+  private def analyzeRecords(records: List[EnergyRecord]): Unit = {
+    println()
+    println("Analyze:")
+    println("1. All records")
+    println("2. By source")
+    println("3. By day")
+    print("Choose analysis option: ")
+
+    val recordsToAnalyzeEither: Either[String, List[EnergyRecord]] =
+      readLine().trim match {
+        case "1" => Right(records)
+        case "2" => InputHelper.readSource("Enter source Solar/Wind/Hydro: ").map(DataFilter.bySource(records, _))
+        case "3" => InputHelper.readDate("Enter date DD/MM/YYYY: ").map(DataFilter.byDay(records, _))
+        case _   => Left("Invalid analysis option.")
+      }
+
+    recordsToAnalyzeEither match {
+      case Right(recordsToAnalyze) =>
+        DataAnalyzer.analyze(recordsToAnalyze) match {
+          case Right(result) => printStatistics(result)
+          case Left(error)   => println(error)
+        }
+      case Left(error) => println(error)
+    }
+  }
+
+  private def printStatistics(result: StatisticsResult): Unit = {
+    println()
+    println("Energy Generation Statistics")
+    println(f"Mean:     ${result.mean}%.2f")
+    println(f"Median:   ${result.median}%.2f")
+    println(s"Mode:     ${result.modes.mkString(", ")}")
+    println(f"Range:    ${result.range}%.2f")
+    println(f"Midrange: ${result.midrange}%.2f")
+  }
+
+  private def showAlerts(records: List[EnergyRecord]): Unit = {
+    val alerts = AlertService.detectAlerts(records)
+    RecursivePrinter.printAlerts(alerts)
+  }
+
+  private def showSuggestions(records: List[EnergyRecord]): Unit = {
+    val suggestions = records.flatMap(record => PlantController.improveProductionSuggestion(record).map(record -> _))
+
+    if (suggestions.isEmpty) println("No improvement suggestions. Production looks acceptable.")
+    else {
+      suggestions.foreach { case (record, suggestion) =>
+        println(s"Record ${record.id} | ${record.source.name} | ${DateUtil.formatDate(record.date)} ${record.hour}:00")
+        println(s"Suggestion: $suggestion")
+      }
+    }
+  }
+}
